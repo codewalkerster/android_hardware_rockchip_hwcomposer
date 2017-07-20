@@ -14,15 +14,6 @@ int hwc_init_version()
 
     strcpy(acVersion,GHWC_VERSION);
 
-#ifdef TARGET_BOARD_PLATFORM_RK3288
-    strcat(acVersion,"-rk3288");
-#endif
-#ifdef TARGET_BOARD_PLATFORM_RK3368
-    strcat(acVersion,"-rk3368");
-#endif
-#ifdef TARGET_BOARD_PLATFORM_RK3366
-    strcat(acVersion,"-rk3366");
-#endif
 #ifdef TARGET_BOARD_PLATFORM_RK3399
     strcat(acVersion,"-rk3399");
 #endif
@@ -35,9 +26,6 @@ int hwc_init_version()
 #endif
 #ifdef RK_PHONE
     strcat(acVersion,"-PHONE");
-#endif
-#ifdef RK_VIR
-    strcat(acVersion,"-VR");
 #endif
 
     /* RK_GRAPHICS_VER=commit-id:067e5d0: only keep string after '=' */
@@ -578,9 +566,6 @@ static bool is_layer_combine(DrmHwcLayer * layer_one,DrmHwcLayer * layer_two)
         ||*/ layer_one->alpha!= layer_two->alpha
         || layer_one->is_scale || layer_two->is_scale
         || is_rec1_intersect_rec2(&layer_one->display_frame,&layer_two->display_frame)
- #ifdef TARGET_BOARD_PLATFORM_RK3288
-        || is_x_intersect(&layer_one->display_frame,&layer_two->display_frame)
- #endif
         )
     {
         ALOGD_IF(log_level(DBG_SILENT),"is_layer_combine layer one alpha=%d,is_scale=%d",layer_one->alpha,layer_one->is_scale);

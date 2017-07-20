@@ -892,13 +892,6 @@ static bool is_use_gles_comp(struct hwc_context_t *ctx, hwc_display_contents_1_t
 #endif
             if(layer->transform)
             {
-#ifdef TARGET_BOARD_PLATFORM_RK3288
-                if(format == HAL_PIXEL_FORMAT_YCrCb_NV12_10)
-                {
-                    ALOGD_IF(log_level(DBG_DEBUG),"rk3288'rga cann't support nv12_10,go to GPU GLES at line=%d", __LINE__);
-                    return true;
-                }
-#endif
                 if(format == HAL_PIXEL_FORMAT_YCrCb_NV12 || format == HAL_PIXEL_FORMAT_YCrCb_NV12_10)
                     transform_nv12++;
                 else
@@ -1173,19 +1166,7 @@ static int hwc_prepare(hwc_composer_device_1_t *dev, size_t num_displays,
             if(layer.mlayer->compositionType == HWC_FRAMEBUFFER_TARGET)
                 continue;
 
-#ifdef TARGET_BOARD_PLATFORM_RK3368
-            if(layer.h_scale_mul > 1.0 &&  (int)(layer.display_frame.right - layer.display_frame.left) > 2560)
-            {
-                ALOGD_IF(log_level(DBG_DEBUG),"On rk3368 don't use rga for scale, go to GPU GLES at line=%d", __LINE__);
-                use_framebuffer_target = true;
-                break;
-            }
-#endif
-            if(layer.transform!=DrmHwcTransform::kRotate0
-#ifndef TARGET_BOARD_PLATFORM_RK3368
-                || (layer.h_scale_mul > 1.0 &&  (int)(layer.display_frame.right - layer.display_frame.left) > 2560)
-#endif
-                )
+            if(layer.transform!=DrmHwcTransform::kRotate0)
             {
                 iRgaCnt++;
             }

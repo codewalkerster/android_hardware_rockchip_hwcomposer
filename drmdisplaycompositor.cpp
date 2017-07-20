@@ -584,27 +584,6 @@ DrmRgaBuffer &rgaBuffer, DrmDisplayComposition *display_comp, DrmHwcLayer &layer
     dst_l = 0;
     dst_t = 0;
 
-#ifdef TARGET_BOARD_PLATFORM_RK3368
-    if(layer.transform & DrmHwcTransform::kRotate90 || layer.transform & DrmHwcTransform::kRotate270)
-    {
-        dst_r = (int)(layer.source_crop.bottom - layer.source_crop.top);
-        dst_b = (int)(layer.source_crop.right - layer.source_crop.left);
-        src_h = ALIGN_DOWN(src_h, 8);
-        src_w = ALIGN_DOWN(src_w, 2);
-    }
-    else
-    {
-        dst_r = (int)(layer.source_crop.right - layer.source_crop.left);
-        dst_b = (int)(layer.source_crop.bottom - layer.source_crop.top);
-        src_w = ALIGN_DOWN(src_w, 8);
-        src_h = ALIGN_DOWN(src_h, 2);
-    }
-    dst_w = dst_r - dst_l;
-    dst_h = dst_b - dst_t;
-
-    dst_w = ALIGN_DOWN(dst_w, 8);
-    dst_h = ALIGN_DOWN(dst_h, 2);
-#else
     src_w = ALIGN_DOWN(src_w, 2);
     src_h = ALIGN_DOWN(src_h, 2);
 
@@ -613,7 +592,6 @@ DrmRgaBuffer &rgaBuffer, DrmDisplayComposition *display_comp, DrmHwcLayer &layer
 
     dst_w = ALIGN(dst_w, 8);
     dst_h = ALIGN(dst_h, 2);
-#endif
 
     if(dst_w < 0 || dst_h <0 )
       ALOGE("RGA invalid dst_w=%d,dst_h=%d",dst_w,dst_h);
