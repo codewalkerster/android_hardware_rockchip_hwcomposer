@@ -287,13 +287,8 @@ class DrmHotplugHandler : public DrmEventHandler {
     update_display_bestmode(hd, HWC_DISPLAY_EXTERNAL, extend);
     DrmMode mode = extend->best_mode();
 
-    if (mode.h_display() > mode.v_display() && mode.v_display() >= 2160) {
-      hd->framebuffer_width = mode.h_display() * (1080.0 / mode.v_display());
-      hd->framebuffer_height = 1080;
-    } else {
-      hd->framebuffer_width = mode.h_display();
-      hd->framebuffer_height = mode.v_display();
-    }
+    hd->framebuffer_width = mode.h_display();
+    hd->framebuffer_height = mode.v_display();
     hd->rel_xres = mode.h_display();
     hd->rel_yres = mode.v_display();
     hd->v_total = mode.v_total();
@@ -1718,13 +1713,6 @@ static int hwc_get_display_configs(struct hwc_composer_device_1 *dev,
     hd->framebuffer_width = mode.h_display();
     hd->framebuffer_height = mode.v_display();
     hd->vrefresh = mode.v_refresh();
-    /*
-     * Limit to 1080p if large than 2160p
-     */
-    if (hd->framebuffer_height >= 2160 && hd->framebuffer_width >= hd->framebuffer_height) {
-      hd->framebuffer_width = hd->framebuffer_width * (1080.0 / hd->framebuffer_height);
-      hd->framebuffer_height = 1080;
-    }
   } else {
     hd->framebuffer_width = 1920;
     hd->framebuffer_height = 1080;
