@@ -33,11 +33,23 @@
 #include <cutils/log.h>
 #include <cutils/properties.h>
 #include <drm_fourcc.h>
+#include <tinyxml2.h>
 
 #include <inttypes.h>
+#include <iostream>
+#include <sstream>
+#include <assert.h>
 
 //you can define it in external/libdrm/include/drm/drm.h
 #define DRM_CLIENT_CAP_SHARE_PLANES     4
+
+#define DRM_ATOMIC_ADD_PROP(object_id, prop_id, value) \
+  if (prop_id) { \
+    ret = drmModeAtomicAddProperty(pset, object_id, prop_id, value); \
+    if (ret < 0) { \
+      ALOGE("Failed to add prop[%d] to [%d]", prop_id, object_id); \
+    } \
+  }
 
 namespace android {
 
@@ -61,10 +73,114 @@ bool SortByZpos(const PlaneGroup* planeGroup1,const PlaneGroup* planeGroup2)
     return planeGroup1->zpos < planeGroup2->zpos;
 }
 
+void DrmResources::init_white_modes(void)
+{
+  tinyxml2::XMLDocument doc;
+
+  doc.LoadFile("/system/usr/share/resolution_white.xml");
+
+  tinyxml2::XMLElement* root=doc.RootElement();
+  /* usr tingxml2 to parse resolution.xml */
+  if (!root)
+    return;
+
+  tinyxml2::XMLElement* resolution =root->FirstChildElement("resolution");
+
+  while (resolution) {
+    drmModeModeInfo m;
+
+  #define PARSE(x) \
+    tinyxml2::XMLElement* _##x = resolution->FirstChildElement(#x); \
+    if (!_##x) { \
+      ALOGE("------> failed to parse %s\n", #x); \
+      resolution = resolution->NextSiblingElement(); \
+      continue; \
+    } \
+    m.x = atoi(_##x->GetText())
+    PARSE(clock);
+    PARSE(hdisplay);
+    PARSE(hsync_start);
+    PARSE(hsync_end);
+    PARSE(hskew);
+    PARSE(vdisplay);
+    PARSE(vsync_start);
+    PARSE(vsync_end);
+    PARSE(vscan);
+    PARSE(vrefresh);
+    PARSE(flags);
+
+    DrmMode mode(&m);
+    /* add modes in "resolution.xml" to white list */
+    white_modes_.push_back(mode);
+    resolution = resolution->NextSiblingElement();
+  }
+}
+
+bool DrmResources::mode_verify(const DrmMode &m) {
+  if (!white_modes_.size())
+    return true;
+
+  for (const DrmMode &mode : white_modes_) {
+    if(mode.h_display() == m.h_display() && mode.v_display() == m.v_display())
+      return true;
+  }
+  return false;
+}
+
+void DrmResources::ConfigurePossibleDisplays()
+{
+  char primary_name[PROPERTY_VALUE_MAX];
+  char extend_name[PROPERTY_VALUE_MAX];
+  int primary_length, extend_length;
+  int default_display_possible = 0;
+  std::string conn_name;
+
+  primary_length = property_get("sys.hwc.device.primary", primary_name, NULL);
+  extend_length = property_get("sys.hwc.device.extend", extend_name, NULL);
+
+  if (!primary_length)
+    default_display_possible |= HWC_DISPLAY_PRIMARY_BIT;
+  if (!extend_length)
+    default_display_possible |= HWC_DISPLAY_EXTERNAL_BIT;
+
+  for (auto &conn : connectors_) {
+    /*
+     * build_in connector default only support on primary display
+     */
+    if (conn->built_in())
+      conn->set_display_possible(default_display_possible & HWC_DISPLAY_PRIMARY_BIT);
+    else
+      conn->set_display_possible(default_display_possible & HWC_DISPLAY_EXTERNAL_BIT);
+  }
+
+  if (primary_length) {
+    std::stringstream ss(primary_name);
+
+    while(getline(ss, conn_name, ',')) {
+      for (auto &conn : connectors_) {
+        if (!strcmp(connector_type_str(conn->get_type()), conn_name.c_str()))
+          conn->set_display_possible(HWC_DISPLAY_PRIMARY_BIT);
+      }
+    }
+  }
+
+  if (extend_length) {
+    std::stringstream ss(extend_name);
+
+    while(getline(ss, conn_name, ',')) {
+      for (auto &conn : connectors_) {
+        if (!strcmp(connector_type_str(conn->get_type()), conn_name.c_str()))
+          conn->set_display_possible(conn->possible_displays() | HWC_DISPLAY_EXTERNAL_BIT);
+      }
+    }
+  }
+}
+
 int DrmResources::Init() {
   char path[PROPERTY_VALUE_MAX];
   property_get("hwc.drm.device", path, "/dev/dri/card0");
 
+  init_white_modes();
   /* TODO: Use drmOpenControl here instead */
   fd_.Set(open(path, O_RDWR));
   if (fd() < 0) {
@@ -231,29 +347,54 @@ int DrmResources::Init() {
     }
     conn->UpdateModes();
 
-    if (conn->built_in() && !found_primary) {
-      conn->set_display(0);
-      found_primary = true;
-      SetPrimaryDisplay(conn.get());
-    } else {
-      conn->set_display(display_num);
-      ++display_num;
-    }
+    conn->set_display(display_num);
+    display_num++;
 
     connectors_.emplace_back(std::move(conn));
   }
 
-  if (!found_primary) {
-     display_num = 0;
-     for (auto &conn : connectors_) {
-       conn->set_display(display_num);
-       display_num++;
-     }
-  }
+  ConfigurePossibleDisplays();
   for (auto &conn : connectors_) {
-    if (conn->display() == 0)
+    if (!(conn->possible_displays() & HWC_DISPLAY_PRIMARY_BIT))
+      continue;
+    if (conn->built_in())
+      continue;
+    if (conn->state() != DRM_MODE_CONNECTED)
+      continue;
+    found_primary = true;
+    SetPrimaryDisplay(conn.get());
+  }
+
+  if (!found_primary) {
+    for (auto &conn : connectors_) {
+      if (!(conn->possible_displays() & HWC_DISPLAY_PRIMARY_BIT))
+        continue;
+      if (conn->state() != DRM_MODE_CONNECTED)
+        continue;
+      found_primary = true;
       SetPrimaryDisplay(conn.get());
-    else if (conn->state() == DRM_MODE_CONNECTED)
+    }
+  }
+
+  if (!found_primary) {
+    for (auto &conn : connectors_) {
+      if (!(conn->possible_displays() & HWC_DISPLAY_PRIMARY_BIT))
+        continue;
+      found_primary = true;
+      SetPrimaryDisplay(conn.get());
+    }
+  }
+
+  if (!found_primary) {
+    ALOGE("failed to find primary display\n");
+    return -ENODEV;
+  }
+
+  for (auto &conn : connectors_) {
+      if (!(conn->possible_displays() & HWC_DISPLAY_EXTERNAL_BIT))
+        continue;
+      if (conn->state() != DRM_MODE_CONNECTED)
+        continue;
       SetExtendDisplay(conn.get());
   }
 
@@ -400,6 +541,8 @@ void DrmResources::SetPrimaryDisplay(DrmConnector *c) {
 
 void DrmResources::SetExtendDisplay(DrmConnector *c) {
   if (extend_ != c) {
+    if (extend_)
+      extend_->force_disconnect(false);
     extend_ = c;
     enable_changed_ = true;
   }
@@ -441,6 +584,59 @@ void DrmResources::ClearDisplay(void)
         continue;
       compositor_.ClearDisplay(i);
     }
+}
+
+int DrmResources::UpdatePropertys(void)
+{
+  int timeline = property_get_int32("sys.display.timeline", -1);
+  int ret;
+  /*
+   * force update propetry when timeline is zero or not exist.
+   */
+  if (timeline && timeline == prop_timeline_)
+    return 0;
+
+  DrmConnector *primary = GetConnectorFromType(HWC_DISPLAY_PRIMARY);
+  DrmConnector *extend = GetConnectorFromType(HWC_DISPLAY_EXTERNAL);
+
+  drmModeAtomicReqPtr pset = drmModeAtomicAlloc();
+  if (!pset) {
+    ALOGE("Failed to allocate property set");
+    return -ENOMEM;
+  }
+
+  if (primary) {
+    DRM_ATOMIC_ADD_PROP(primary->id(), primary->brightness_id_property().id(),
+                        property_get_int32("persist.sys.brightness.main", 50))
+    DRM_ATOMIC_ADD_PROP(primary->id(), primary->contrast_id_property().id(),
+                        property_get_int32("persist.sys.contrast.main", 50))
+    DRM_ATOMIC_ADD_PROP(primary->id(), primary->saturation_id_property().id(),
+                        property_get_int32("persist.sys.saturation.main", 50))
+    DRM_ATOMIC_ADD_PROP(primary->id(), primary->hue_id_property().id(),
+                        property_get_int32("persist.sys.hue.main", 50))
+  }
+  if (extend) {
+    DRM_ATOMIC_ADD_PROP(extend->id(), extend->brightness_id_property().id(),
+                        property_get_int32("persist.sys.brightness.aux", 50))
+    DRM_ATOMIC_ADD_PROP(extend->id(), extend->contrast_id_property().id(),
+                        property_get_int32("persist.sys.contrast.aux", 50))
+    DRM_ATOMIC_ADD_PROP(extend->id(), extend->saturation_id_property().id(),
+                        property_get_int32("persist.sys.saturation.aux", 50))
+    DRM_ATOMIC_ADD_PROP(extend->id(), extend->hue_id_property().id(),
+                        property_get_int32("persist.sys.hue.aux", 50))
+  }
+
+  uint32_t flags = 0;
+  ret = drmModeAtomicCommit(fd_.get(), pset, flags, this);
+  if (ret < 0) {
+    ALOGE("Failed to commit pset ret=%d\n", ret);
+    drmModeAtomicFree(pset);
+    return ret;
+  }
+  drmModeAtomicFree(pset);
+  prop_timeline_ = timeline;
+
+  return 0;
 }
 
 int DrmResources::UpdateDisplayRoute(void)
@@ -514,6 +710,8 @@ int DrmResources::UpdateDisplayRoute(void)
             ALOGD_IF(log_level(DBG_VERBOSE), "set extend[%d] with crtc=%d\n", extend->id(), crtc->id());
             if (primary && primary->encoder() && primary->encoder()->crtc()) {
               if (crtc == primary->encoder()->crtc()) {
+                primary->encoder()->set_crtc(NULL);
+                primary->set_encoder(NULL);
                 for (DrmEncoder *primary_enc : primary->possible_encoders()) {
                   for (DrmCrtc *primary_crtc : primary_enc->possible_crtcs()) {
                     if (extend && extend->encoder() && extend->encoder()->crtc()) {
@@ -533,17 +731,20 @@ int DrmResources::UpdateDisplayRoute(void)
       }
     }
   }
+  if (primary && primary->encoder() && primary->encoder()->crtc())
+    property_set("sys.hwc.device.main", connector_type_str(primary->get_type()));
+  else
+    property_set("sys.hwc.device.main", "");
+
+  if (extend && extend->encoder() && extend->encoder()->crtc())
+    property_set("sys.hwc.device.aux", connector_type_str(extend->get_type()));
+  else
+    property_set("sys.hwc.device.aux", "");
 
   drmModeAtomicReqPtr pset = drmModeAtomicAlloc();
   if (!pset) {
     ALOGE("Failed to allocate property set");
     return -ENOMEM;
-  }
-
-#define DRM_ATOMIC_ADD_PROP(object_id, prop_id, value) \
-  ret = drmModeAtomicAddProperty(pset, object_id, prop_id, value); \
-  if (ret < 0) { \
-    ALOGE("Failed to add prop[%d] to [%d]", prop_id, object_id); \
   }
 
   int ret;
@@ -668,7 +869,13 @@ int DrmResources::UpdateDisplayRoute(void)
 
   drmModeAtomicFree(pset);
 
+  hotplug_timeline++;
+
   return 0;
+}
+
+int DrmResources::timeline(void) {
+  return hotplug_timeline;
 }
 
 int DrmResources::CreatePropertyBlob(void *data, size_t length,
@@ -833,6 +1040,8 @@ struct type_name connector_type_names[] = {
 	{ DRM_MODE_CONNECTOR_HDMIB, "HDMI-B" },
 	{ DRM_MODE_CONNECTOR_TV, "TV" },
 	{ DRM_MODE_CONNECTOR_eDP, "eDP" },
+	{ DRM_MODE_CONNECTOR_VIRTUAL, "Virtual" },
+	{ DRM_MODE_CONNECTOR_DSI, "DSI" },
 };
 
 type_name_fn(connector_type)

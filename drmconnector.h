@@ -44,6 +44,8 @@ class DrmConnector {
   int display() const;
   void set_display(int display);
 
+  void set_display_possible(int display_bit);
+
   bool built_in() const;
 
   int UpdateModes();
@@ -61,6 +63,10 @@ class DrmConnector {
 
   const DrmProperty &dpms_property() const;
   const DrmProperty &crtc_id_property() const;
+  const DrmProperty &brightness_id_property() const;
+  const DrmProperty &contrast_id_property() const;
+  const DrmProperty &saturation_id_property() const;
+  const DrmProperty &hue_id_property() const;
 
   const std::vector<DrmEncoder *> &possible_encoders() const {
     return possible_encoders_;
@@ -72,6 +78,7 @@ class DrmConnector {
   void force_disconnect(bool force);
 
   uint32_t get_type() { return type_; }
+  int possible_displays() { return possible_displays_; }
 
   uint32_t mm_width() const;
   uint32_t mm_height() const;
@@ -79,7 +86,6 @@ class DrmConnector {
   void update_state(drmModeConnection state);
   void update_size(int w, int h);
   void dump_connector(std::ostringstream *out) const;
-
 
  private:
   DrmResources *drm_;
@@ -102,8 +108,13 @@ class DrmConnector {
 
   DrmProperty dpms_property_;
   DrmProperty crtc_id_property_;
+  DrmProperty brightness_id_property_;
+  DrmProperty contrast_id_property_;
+  DrmProperty saturation_id_property_;
+  DrmProperty hue_id_property_;
 
   std::vector<DrmEncoder *> possible_encoders_;
+  uint32_t possible_displays_;
 
   drmModeConnectorPtr connector_;
 };

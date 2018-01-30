@@ -54,6 +54,23 @@ int DrmConnector::Init() {
     ALOGE("Could not get CRTC_ID property\n");
     return ret;
   }
+
+  ret = drm_->GetConnectorProperty(*this, "brightness", &brightness_id_property_);
+  if (ret)
+    ALOGW("Could not get brightness property\n");
+
+  ret = drm_->GetConnectorProperty(*this, "contrast", &contrast_id_property_);
+  if (ret)
+    ALOGW("Could not get contrast property\n");
+
+  ret = drm_->GetConnectorProperty(*this, "saturation", &saturation_id_property_);
+  if (ret)
+    ALOGW("Could not get saturation property\n");
+
+  ret = drm_->GetConnectorProperty(*this, "hue", &hue_id_property_);
+  if (ret)
+    ALOGW("Could not get hue property\n");
+
   return 0;
 }
 
@@ -69,15 +86,22 @@ void DrmConnector::set_display(int display) {
   display_ = display;
 }
 
+void DrmConnector::set_display_possible(int possible_displays) {
+  possible_displays_ = possible_displays;
+}
+
 bool DrmConnector::built_in() const {
   return type_ == DRM_MODE_CONNECTOR_LVDS || type_ == DRM_MODE_CONNECTOR_eDP ||
-         type_ == DRM_MODE_CONNECTOR_DSI || type_ == DRM_MODE_CONNECTOR_VIRTUAL;
+         type_ == DRM_MODE_CONNECTOR_DSI ||
+         type_ == DRM_MODE_CONNECTOR_VIRTUAL ||
+         type_ == DRM_MODE_CONNECTOR_TV;
 }
 
 const DrmMode &DrmConnector::best_mode() const {
   return best_mode_;
 }
 
+/* update mode infomation */
 int DrmConnector::UpdateModes() {
   int fd = drm_->fd();
 
@@ -94,8 +118,9 @@ int DrmConnector::UpdateModes() {
   std::vector<DrmMode> new_modes;
   for (int i = 0; i < c->count_modes; ++i) {
     bool exists = false;
+    bool verify = false;
     for (const DrmMode &mode : modes_) {
-      if (mode == c->modes[i]) {
+      if (mode == c->modes[i] && drm_->mode_verify(mode)) {
         new_modes.push_back(mode);
         exists = true;
         break;
@@ -105,6 +130,9 @@ int DrmConnector::UpdateModes() {
       continue;
 
     DrmMode m(&c->modes[i]);
+    if (!drm_->mode_verify(m))
+      continue;
+
     m.set_id(drm_->next_mode_id());
     new_modes.push_back(m);
   }
@@ -155,6 +183,19 @@ const DrmProperty &DrmConnector::dpms_property() const {
 
 const DrmProperty &DrmConnector::crtc_id_property() const {
   return crtc_id_property_;
+}
+
+const DrmProperty &DrmConnector::brightness_id_property() const {
+  return brightness_id_property_;
+}
+const DrmProperty &DrmConnector::contrast_id_property() const {
+  return contrast_id_property_;
+}
+const DrmProperty &DrmConnector::saturation_id_property() const {
+  return saturation_id_property_;
+}
+const DrmProperty &DrmConnector::hue_id_property() const {
+  return hue_id_property_;
 }
 
 DrmEncoder *DrmConnector::encoder() const {

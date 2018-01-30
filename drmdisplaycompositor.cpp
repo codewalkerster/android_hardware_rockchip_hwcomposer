@@ -39,7 +39,7 @@
 #include "glworker.h"
 #include "hwc_util.h"
 #include "hwc_debug.h"
-
+#include "hwc_rockchip.h"
 
 #define DRM_QUEUE_USLEEP 10
 #define DRM_DISPLAY_COMPOSITOR_MAX_QUEUE_DEPTH 1
@@ -305,6 +305,7 @@ DrmDisplayCompositor::DrmDisplayCompositor()
       mUseRga_(false),
 #endif
       squash_framebuffer_index_(0),
+      vop_bw_fd_(-1),
       dump_frames_composited_(0),
       dump_last_timestamp_ns_(0) {
   struct timespec ts;
@@ -347,6 +348,9 @@ DrmDisplayCompositor::~DrmDisplayCompositor() {
 
   pthread_mutex_destroy(&lock_);
   pthread_cond_destroy(&composite_queue_cond_);
+
+  if(vop_bw_fd_ > 0)
+    close(vop_bw_fd_);
 }
 
 int DrmDisplayCompositor::Init(DrmResources *drm, int display) {
@@ -373,6 +377,15 @@ int DrmDisplayCompositor::Init(DrmResources *drm, int display) {
   }
 
   pthread_cond_init(&composite_queue_cond_, NULL);
+
+
+  vop_bw_fd_ = open(VOP_BW_PATH, O_WRONLY);
+  if(vop_bw_fd_ < 0)
+  {
+    char buf[80];
+    strerror_r(errno, buf, sizeof(buf));
+    ALOGE("vop_bw: Error opening %s: %s\n", VOP_BW_PATH, buf);
+  }
 
   initialized_ = true;
   return 0;
@@ -663,7 +676,7 @@ DrmRgaBuffer &rgaBuffer, DrmDisplayComposition *display_comp, DrmHwcLayer &layer
             strerror(errno), (void*)layer.sf_handle, (void*)(rgaBuffer.buffer()->handle));
     }
 
-    //DumpLayer("rga", dst.hnd);
+    DumpLayer("rga", dst.hnd);
 
     //instead of the original DrmHwcLayer
     layer.is_rotate_by_rga = true;
@@ -1011,6 +1024,8 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
 
   int ret = 0;
   uint32_t afbc_plane_id = 0;
+  uint32_t plane_size = 0;
+  uint32_t vop_bandwidth = 0, total_bandwidth = 0;
 
   std::vector<DrmHwcLayer> &layers = display_comp->layers();
   std::vector<DrmCompositionPlane> &comp_planes =
@@ -1140,6 +1155,7 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
 #if USE_AFBC_LAYER
     bool is_afbc = false;
 #endif
+    int format = 0;
     if (comp_plane.type() != DrmCompositionPlane::Type::kDisable) {
       if (source_layers.size() > 1) {
         ALOGE("Can't handle more than one source layer sz=%zu type=%d",
@@ -1167,20 +1183,11 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
         if(!(layer.gralloc_buffer_usage & 0x08000000))
 #endif
         {
-            for (int i = 0; i < kAcquireWaitTries; ++i) {
-              int fence_timeout = kAcquireWaitTimeoutMs * (1 << i);
-              total_fence_timeout += fence_timeout;
-              ret = sync_wait(acquire_fence, -1);
-              if (ret)
-                ALOGW("Acquire fence %d wait %d failed (%d). Total time %d",
-                      acquire_fence, i, ret, total_fence_timeout);
-              else
-                break;  //rk: wait successfully
-            }
-            if (ret) {
-              ALOGE("Failed to wait for acquire %d/%d", acquire_fence, ret);
-              break;
-            }
+          ret = sync_wait(acquire_fence, 1000);
+          if (ret) {
+            ALOGE("Failed to wait for acquire %d/%d 1000ms", acquire_fence, ret);
+            break;
+          }
         }
         layer.acquire_fence.Close();
       }
@@ -1189,7 +1196,7 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
         break;
       }
 
-      DumpLayer(layer.name.c_str(),layer.get_usable_handle());
+     // DumpLayer(layer.name.c_str(),layer.get_usable_handle());
 
 #if RK_VIDEO_SKIP_LINE
       bSkipLine = layer.bSkipLine;
@@ -1227,6 +1234,7 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
         ALOGD_IF(log_level(DBG_VERBOSE),"fbdc layer %s,plane id=%d",layer.name.c_str(),afbc_plane_id);
     }
 #endif
+    format = layer.format;
 
 #if RK_RGA
       is_rotate_by_rga = layer.is_rotate_by_rga;
@@ -1277,13 +1285,25 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
 
     int dst_l,dst_t,dst_w,dst_h;
     int src_l,src_t,src_w,src_h;
+    float hfactor;
+    int scale_factor;
+    float src_bpp;
 
     src_l = (int)source_crop.left;
     src_t = (int)source_crop.top;
     src_w = (int)(source_crop.right - source_crop.left);
 #if RK_VIDEO_SKIP_LINE
     if(bSkipLine)
-        src_h = (int)(source_crop.bottom - source_crop.top)/2;
+    {
+        if(format == HAL_PIXEL_FORMAT_YCrCb_NV12_10)
+        {
+            src_h = (int)(source_crop.bottom - source_crop.top)/SKIP_LINE_NUM_NV12_10;
+        }
+        else
+        {
+            src_h = (int)(source_crop.bottom - source_crop.top)/SKIP_LINE_NUM_NV12;
+        }
+    }
     else
 #endif
         src_h = (int)(source_crop.bottom - source_crop.top);
@@ -1301,14 +1321,19 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
     ALOGD_IF(log_level(DBG_VERBOSE),"scale dst: w_scale=%f,h_scale=%f",w_scale,h_scale);
 #endif
 
-//zxl: src_l/src_w need 16bytes aligned and src_t/src_h need 4bytes aligned in FBDC area.
+//zxl: src_l/src_w need 16 pixels aligned and src_t/src_h need 4 pixels aligned in FBDC area.
 #if USE_AFBC_LAYER
     if(afbc_plane_id == plane->id())
     {
         src_l = IS_ALIGN(src_l, 16)?src_l:ALIGN(src_l, 16);
         src_t = IS_ALIGN(src_t, 4)?src_t:ALIGN(src_t, 4);
-        src_w = IS_ALIGN(src_w, 16)?src_w:(ALIGN(src_w - src_l, 16)-16);
-        src_h = IS_ALIGN(src_h, 4)?src_h:(ALIGN(src_h - src_t, 4)-4);
+        src_w = IS_ALIGN(src_w, 16)?src_w:(ALIGN(src_w, 16)-16);
+        src_h = IS_ALIGN(src_h, 4)?src_h:(ALIGN(src_h, 4)-4);
+
+        dst_l = IS_ALIGN(dst_l, 16)?dst_l:ALIGN(dst_l, 16);
+        dst_t = IS_ALIGN(dst_t, 4)?dst_t:ALIGN(dst_t, 4);
+        dst_w = IS_ALIGN(dst_w, 16)?dst_w:(ALIGN(dst_w, 16)-16);
+        dst_h = IS_ALIGN(dst_h, 4)?dst_h:(ALIGN(dst_h, 4)-4);
     }
 #endif
     if(is_yuv)
@@ -1349,6 +1374,16 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
       break;
     }
 
+    hfactor = (float)src_w/dst_w;
+    scale_factor = hfactor > 1.0 ? 2:1;
+    src_bpp = getPixelWidthByAndroidFormat(format);
+    vop_bandwidth = src_w * src_h * src_bpp * scale_factor;
+    total_bandwidth += vop_bandwidth;
+    ALOGD_IF(log_level(DBG_VERBOSE),"vop_bw: plane=%d,w=%d,h=%d,bpp=%f,scale_factor=%d,vop_bandwidth=%d bytes",
+                (plane ? plane->id() : -1),src_w,src_h,src_bpp,scale_factor,vop_bandwidth);
+
+    plane_size++;
+
     size_t index=0;
     std::ostringstream out_log;
 
@@ -1366,6 +1401,7 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
 #if USE_AFBC_LAYER
             << ", is_afbc=" << is_afbc
 #endif
+            << ", vop_bandwidth=" << vop_bandwidth
             ;
     index++;
 
@@ -1404,6 +1440,23 @@ out:
 
   if (!ret) {
     uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
+    char vop_bw_str[50];
+    int w_len = 0;
+    char buf[80];
+
+    total_bandwidth = total_bandwidth /(1024.0 * 1024.0) * 60;
+    sprintf(vop_bw_str,"%d,%d", plane_size, total_bandwidth);
+    ALOGD_IF(log_level(DBG_VERBOSE),"vop_bw: plane_size=%d, total_bandwidth=%d M, vop_bw_str=%s", plane_size, total_bandwidth, vop_bw_str);
+    if(vop_bw_fd_ > 0)
+    {
+        w_len = write(vop_bw_fd_, vop_bw_str, strlen(vop_bw_str));
+        if(w_len < 0)
+        {
+            strerror_r(errno, buf, sizeof(buf));
+            ALOGE("vop_bw: Error writing to fd=%d: %s\n", vop_bw_fd_, buf);
+        }
+    }
+
     if (test_only)
       flags |= DRM_MODE_ATOMIC_TEST_ONLY;
 
@@ -1500,6 +1553,7 @@ void DrmDisplayCompositor::ApplyFrame(
 int DrmDisplayCompositor::Composite() {
   ATRACE_CALL();
 
+#if USE_GL_WORKER
   if (!pre_compositor_) {
     pre_compositor_.reset(new GLWorkerCompositor());
     int ret = pre_compositor_->Init();
@@ -1508,6 +1562,7 @@ int DrmDisplayCompositor::Composite() {
       return ret;
     }
   }
+#endif
 
   int ret = pthread_mutex_lock(&lock_);
   if (ret) {

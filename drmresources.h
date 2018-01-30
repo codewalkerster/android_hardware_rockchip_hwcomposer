@@ -34,11 +34,12 @@ namespace android {
 const char * res##_str(int type);
 
 typedef struct tagPlaneGroup{
-        bool     bUse;
-        uint32_t zpos;
-        uint32_t possible_crtcs;
-        uint64_t share_id;
-        std::vector<DrmPlane*> planes;
+	bool     b_reserved;
+	bool     bUse;
+	uint32_t zpos;
+	uint32_t possible_crtcs;
+	uint64_t share_id;
+	std::vector<DrmPlane*> planes;
 }PlaneGroup;
 
 class DrmResources {
@@ -72,6 +73,7 @@ class DrmResources {
     return sort_planes_;
   }
 
+  bool mode_verify(const DrmMode &mode);
   void DisplayChanged(void);
   void SetPrimaryDisplay(DrmConnector *c);
   void SetExtendDisplay(DrmConnector *c);
@@ -93,7 +95,9 @@ class DrmResources {
   int SetDisplayActiveMode(int display, const DrmMode &mode);
   int SetDpmsMode(int display, uint64_t mode);
   int UpdateDisplayRoute(void);
+  int UpdatePropertys(void);
   void ClearDisplay(void);
+  int timeline(void);
 
   int CreatePropertyBlob(void *data, size_t length, uint32_t *blob_id);
   int DestroyPropertyBlob(uint32_t blob_id);
@@ -115,6 +119,8 @@ class DrmResources {
 #endif
 
  private:
+  void init_white_modes(void);
+  void ConfigurePossibleDisplays();
   int TryEncoderForDisplay(int display, DrmEncoder *enc);
   int GetProperty(uint32_t obj_id, uint32_t obj_type, const char *prop_name,
                   DrmProperty *property);
@@ -129,6 +135,8 @@ class DrmResources {
   bool enable_changed_;
   DrmConnector *primary_;
   DrmConnector *extend_;
+  int hotplug_timeline;
+  int prop_timeline_;
 
   std::vector<std::unique_ptr<DrmConnector>> connectors_;
   std::vector<std::unique_ptr<DrmEncoder>> encoders_;
@@ -139,6 +147,7 @@ class DrmResources {
   DrmCompositor compositor_;
   DrmEventListener event_listener_;
   const gralloc_module_t *gralloc_;
+  std::vector<DrmMode> white_modes_;
 };
 }
 
